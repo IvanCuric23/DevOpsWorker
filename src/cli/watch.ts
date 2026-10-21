@@ -8,7 +8,7 @@ import { connectStores } from '../db/connect-stores.ts';
 import { loadConfig } from './config.ts';
 import { assertRealAdoConfig } from '../sdk/config-sanity.ts';
 import { queryWorkItems, addWorkItemTags, removeWorkItemTags, findRerunCommandInComments, findRerunCommandInPRComments, getPullRequestStatus, fetchTestCaseFailures } from '../sdk/azure-devops-client.ts';
-import { buildAreaPathFilter, getActiveAreaPaths } from '../config/repos.ts';
+import { buildAreaPathFilter, getActiveAreaPaths, repos } from '../config/repos.ts';
 import { hydrateRegistryFromDb } from '../config/hydrate.ts';
 import { removeWorkspaceVolume } from '../sdk/docker.ts';
 import type { PipelineConfig, PipelineState, TestCaseFailure } from '../types/pipeline.types.ts';
@@ -46,6 +46,7 @@ import {
 import { ensurePat, reprovisionEnv } from './watch/env-actions.ts';
 import { processActionFiles } from './watch/action-processor.ts';
 import { startScheduled, stopScheduled } from './watch/scheduler.ts';
+import { pollMinutesFromEnv, pollPullRequestsForReview } from './watch/pr-review-poller.ts';
 import { loadManifest } from '../overlay/loader.ts';
 
 // Re-exported for existing consumers/tests that import these from watch.ts.
@@ -602,6 +603,7 @@ export async function watch(args: string[]): Promise<void> {
     clearInterval(heartbeatInterval);
     clearInterval(janitorInterval);
     stopScheduled(scheduledHandles);
+    if (prPollInterval) clearInterval(prPollInterval);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
@@ -642,7 +644,7 @@ export async function watch(args: string[]): Promise<void> {
   // Fail loud if AZURE_DEVOPS_* env vars weren't supplied — otherwise the watcher
   // polls 'your-org'/'Your Project' and every WIQL query 404s silently.
   assertRealAdoConfig(pollingConfig, 'watcher');
-  const { stateStore, actionStore, runnerStatus, prReviewStore, registryStore, settingsStore } = await connectStores();
+  const { stateStore, actionStore, runnerStatus, prReviewStore, registryStore, settingsStore, webhookEventStore } = await connectStores();
 
   // Independent heartbeat — runs every 30s regardless of poll loop or container blocking
   const heartbeatInterval = setInterval(async () => {
@@ -668,6 +670,25 @@ export async function watch(args: string[]): Promise<void> {
   // already warm (src/cli/index.ts awaits it at startup), and yields `{}` with no
   // overlay installed — in which case nothing is registered and nothing is logged.
   const scheduledHandles = startScheduled((await loadManifest()).scheduled);
+
+  // PR review without webhooks (PR_REVIEW_POLL_MINUTES) — see ./watch/pr-review-poller.ts.
+  const prPollMinutes = pollMinutesFromEnv();
+  const prPollSince = process.env['PR_REVIEW_POLL_SINCE'] || new Date().toISOString();
+  let prPollBusy = false;
+  const prPollInterval = prPollMinutes > 0
+    ? setInterval(async () => {
+      if (prPollBusy) return;
+      prPollBusy = true;
+      try {
+        await pollPullRequestsForReview(pollingConfig, { stateStore, webhookEventStore, repos, log }, prPollSince);
+      } catch (err) {
+        log(`PR poll failed: ${err instanceof Error ? err.message : err}`);
+      } finally {
+        prPollBusy = false;
+      }
+    }, prPollMinutes * 60_000)
+    : undefined;
+  if (prPollInterval) log(`PR review polling every ${prPollMinutes} min (PRs and /review comments after ${prPollSince})`);
 
   // Recover orphaned sessions — launch into pool concurrently
   const orphaned = await findOrphanedSessions(stateStore, pollingConfig);

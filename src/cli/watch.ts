@@ -23,6 +23,7 @@ import {
   type WorkDetectionInputs,
   type CheckpointScan,
   type PlanApprovedItem,
+  type ContinueItem,
   type PrCompletedItem,
   type ReprovisionItem,
 } from './watch/work-detector.ts';
@@ -196,10 +197,10 @@ async function gatherWorkDetectionInputs(
     planApproved.push({ id, state: await stateStore.load(id) });
   }
 
-  const continueTagged: PlanApprovedItem[] = [];
+  const continueTagged: ContinueItem[] = [];
   for (const id of continueIds) {
     if (skipIds.has(id)) continue;
-    continueTagged.push({ id, state: await stateStore.load(id) });
+    continueTagged.push({ id, state: await stateStore.load(id), via: 'tag' });
   }
 
   // Ids the analyse / plan-approved paths already claim. Later (expensive) scans
@@ -211,6 +212,31 @@ async function gatherWorkDetectionInputs(
   );
 
   const allIds = await stateStore.listAll();
+
+  // Path 1b by comment — `/continue` (`@agent continue`) on an item stopped
+  // waiting for input, `/approve` (`@agent approve`) on an item paused for plan
+  // approval. Same action as the tag; the comment is matched only after the
+  // pause, so it fires once. `/continue` is limited to errored items: at a
+  // checkpoint it would re-pause with the same timestamp and fire every poll.
+  for (const id of allIds) {
+    if (skipIds.has(id) || claimed.has(id)) continue;
+    const state = await stateStore.load(id);
+    if (!state || state.completedAt) continue;
+    const since = sinceFor(state);
+    if (state.error && needInputIds.has(id)) {
+      const found = await findRerunCommandInComments(id, '/continue', config, since).catch(() => null);
+      if (found) {
+        continueTagged.push({ id, state, via: 'comment' });
+        claimed.add(id);
+      }
+    } else if (!state.error && state.checkpoint?.name === 'plan-approved') {
+      const found = await findRerunCommandInComments(id, '/approve', config, since).catch(() => null);
+      if (found) {
+        continueTagged.push({ id, state, via: 'comment', approve: true });
+        claimed.add(id);
+      }
+    }
+  }
 
   // Paths 3/4/5 — scan paused items (scannable checkpoint or error state) for
   // /rerun-plan | /fix | /fix-test.

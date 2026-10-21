@@ -450,6 +450,47 @@ describe('detectWork — continue tag', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The same signals as comments — `@agent continue` / `@agent approve`
+// (gathered by the watcher as `via: 'comment'` items)
+// ---------------------------------------------------------------------------
+
+describe('detectWork — continue / approve by comment', () => {
+  const errored = () => baseState({ error: { type: 'needs-input', stage: 'analyzer', message: 'm', timestamp: 't' } });
+  const atPlan = () => baseState({ checkpoint: { name: 'plan-approved', enteredAt: 't' } });
+
+  test('/continue comment resumes an item waiting for input, like the tag', () => {
+    const [action, ...rest] = detectWork(inputs({
+      continueTagged: [{ id: 43, state: errored(), via: 'comment' }],
+      needInputIds: new Set([43]),
+    }));
+    expect(rest).toEqual([]);
+    expect(action!.kind).toBe('continue');
+    expect(action!.stateDelta).toEqual({ error: undefined });
+    expect(action!.tagOps?.remove).toEqual(['continue', 'need-input']);
+    expect(action!.tagOps?.add).toBeUndefined();
+    expect(action!.log).toContain('/continue comment');
+  });
+
+  test('/approve comment adds the plan-approved tag the checkpoint checks', () => {
+    const [action] = detectWork(inputs({
+      continueTagged: [{ id: 43, state: atPlan(), via: 'comment', approve: true }],
+    }));
+    expect(action!.kind).toBe('continue');
+    expect(action!.tagOps?.add).toEqual(['plan-approved']);
+    expect(action!.log).toContain('/approve comment');
+  });
+
+  test('does not also dispatch the plan-approved path for the same item', () => {
+    const st = atPlan();
+    const actions = detectWork(inputs({
+      continueTagged: [{ id: 43, state: st, via: 'comment', approve: true }],
+      planApproved: [{ id: 43, state: st }],
+    }));
+    expect(actions.map((a) => a.kind)).toEqual(['continue']);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // /fix when there is no code yet
 //
 // Work item 81098: the planning loop ran out of budget, the pipeline told the

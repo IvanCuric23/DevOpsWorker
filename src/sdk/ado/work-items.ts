@@ -1,6 +1,7 @@
 import type { PipelineConfig, WorkItem } from '../../types/pipeline.types.ts';
 import { isPipelineComment } from '../../formatters/devops-comment.ts';
 import { adoFetch } from './http.ts';
+import { commentToCommandText, hasCommand } from './agent-keyword.ts';
 
 // ---------------------------------------------------------------------------
 // Private response types
@@ -97,10 +98,9 @@ export async function findRerunCommandInComments(
     // unfiltered scan is one line-break away from the pipeline answering itself
     // in a loop. getCommentsSince already filters these; this scan did not.
     if (isPipelineComment(comment.text)) continue;
-    // Strip HTML tags — DevOps comments are HTML-formatted
-    const plainText = comment.text.replace(/<[^>]+>/g, '').trim();
-    const commandRegex = new RegExp(`(?:^|\\n)\\s*${command.replace('/', '\\/')}`, 'm');
-    if (commandRegex.test(plainText)) {
+    // DevOps comments are HTML; `@agent <verb>` lines become their slash command.
+    const plainText = commentToCommandText(comment.text);
+    if (hasCommand(plainText, command)) {
       return plainText;
     }
   }
@@ -128,11 +128,7 @@ export async function fetchWorkItemCommentsSince(
     // Filter out pipeline-generated comments
     if (isPipelineComment(comment.text)) return false;
     // Filter out the rerun command comment itself (already captured separately)
-    if (excludeCommand) {
-      const plainText = comment.text.replace(/<[^>]+>/g, '').trim();
-      const commandRegex = new RegExp(`(?:^|\\n)\\s*${excludeCommand.replace('/', '\\/')}`, 'm');
-      if (commandRegex.test(plainText)) return false;
-    }
+    if (excludeCommand && hasCommand(commentToCommandText(comment.text), excludeCommand)) return false;
     return true;
   });
 }

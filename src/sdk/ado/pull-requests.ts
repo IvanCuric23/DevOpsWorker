@@ -1,5 +1,6 @@
 import type { PipelineConfig } from '../../types/pipeline.types.ts';
 import { adoFetch, AzureDevOpsError } from './http.ts';
+import { commentToCommandText, hasCommand } from './agent-keyword.ts';
 import { diffCommits } from '../git-diff.ts';
 import type { FileDiff } from './backport.ts';
 
@@ -102,9 +103,8 @@ export async function findRerunCommandInPRComments(
 
   for (const comment of allComments) {
     if (since && comment.publishedDate <= since) continue;
-    const commandRegex = new RegExp(`(?:^|\\n)\\s*${command.replace('/', '\\/')}`, 'm');
-    const plainText = comment.content!.replace(/<[^>]+>/g, '').trim();
-    if (commandRegex.test(plainText)) {
+    const plainText = commentToCommandText(comment.content!);
+    if (hasCommand(plainText, command)) {
       return plainText;
     }
   }

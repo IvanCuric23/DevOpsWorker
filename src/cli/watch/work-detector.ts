@@ -38,6 +38,14 @@ export interface PlanApprovedItem {
   state: PipelineState | null;
 }
 
+/** An item to resume: tagged `continue`, or a `/continue` / `/approve` comment. */
+export interface ContinueItem extends PlanApprovedItem {
+  /** Where the signal came from; a comment leaves no tag to clean up but needs logging. */
+  via?: 'tag' | 'comment';
+  /** `/approve` at the plan checkpoint: add the `plan-approved` tag the checkpoint checks. */
+  approve?: boolean;
+}
+
 /** Comment-scan facts for one paused item. At most one feedback is set when the
  *  gather layer short-circuits (rerun-plan > fix > fix-test), but the decision
  *  applies that precedence independently, so multiple may be set in tests. */
@@ -87,8 +95,12 @@ export interface WorkDetectionInputs {
    * it and `analyse` discards the run, `plan-approved` is gated, and comment scans
    * only cover items paused at a checkpoint. `continue` is a human acting on a
    * specific item, so it is trusted where the automatic path is not.
+   *
+   * Also carries items whose newest human comment since the pause is `/continue`
+   * or `/approve` (or `@agent continue` / `@agent approve`), gathered by the
+   * watcher — the same signal, written as a comment instead of a tag.
    */
-  continueTagged: PlanApprovedItem[];
+  continueTagged: ContinueItem[];
   planApproved: PlanApprovedItem[];
   checkpointScans: CheckpointScan[];
   prCompleted: PrCompletedItem[];
@@ -373,7 +385,7 @@ export function detectWork(inputs: WorkDetectionInputs): DetectedAction[] {
   // Both tags are removed on pickup: `continue` because it is a one-shot signal
   // that would otherwise re-fire every poll, and `need-input` because the human
   // supplying it has answered the question that tag was asking.
-  for (const { id, state } of continueTagged) {
+  for (const { id, state, via, approve } of continueTagged) {
     if (skipIds.has(id)) continue;
     if (!state?.error && !state?.checkpoint) continue;
     const stateDelta: Partial<PipelineState> = {};
@@ -383,14 +395,17 @@ export function detectWork(inputs: WorkDetectionInputs): DetectedAction[] {
       // would die again on its first review round.
       if (state.error.type === 'revision-exhausted') stateDelta.skipResetState = true;
     }
+    const signal = via === 'comment' ? (approve ? '/approve comment' : '/continue comment') : 'continue tag';
     actions.push({
       kind: 'continue',
       workItemId: id,
       stateDelta,
-      tagOps: { remove: ['continue', 'need-input'] },
+      tagOps: approve
+        ? { remove: ['continue', 'need-input'], add: ['plan-approved'] }
+        : { remove: ['continue', 'need-input'] },
       log: state.error
-        ? `continue tag present with error at "${state.error.stage}" — resuming`
-        : `continue tag present at checkpoint "${state.checkpoint?.name}" — resuming`,
+        ? `${signal} present with error at "${state.error.stage}" — resuming`
+        : `${signal} present at checkpoint "${state.checkpoint?.name}" — resuming`,
     });
     claimed.add(id);
     continueClaimed.add(id);

@@ -2,7 +2,7 @@ import type { z } from 'zod';
 import type { AgentConfig } from '../types/agent.types.ts';
 import type { PipelineState, PipelineContext, Stage, StageResult } from '../types/pipeline.types.ts';
 import { runAgent } from '../sdk/run-agent.ts';
-import { AgentExecutionError } from '../sdk/errors.ts';
+import { AgentExecutionError, PipelineError } from '../sdk/errors.ts';
 
 // ---------------------------------------------------------------------------
 // agentStage — wraps an AgentConfig into a Stage
@@ -101,18 +101,34 @@ export function agentStage<T extends z.ZodType>(
         subtype: result.subtype,
       };
 
-      const newState = config.applyOutput(state, result.output);
-
-      return {
-        state: {
-          ...newState,
-          telemetry: {
-            totalCostUsd: state.telemetry.totalCostUsd + result.costUsd,
-            totalDurationMs: state.telemetry.totalDurationMs + result.durationMs,
-            stages: [...state.telemetry.stages, telemetryEntry],
-          },
-        },
+      const telemetry = {
+        totalCostUsd: state.telemetry.totalCostUsd + result.costUsd,
+        totalDurationMs: state.telemetry.totalDurationMs + result.durationMs,
+        stages: [...state.telemetry.stages, telemetryEntry],
       };
+
+      return { state: applyOutputKeepingTelemetry(config.applyOutput, state, result.output, telemetry) };
     },
   };
+}
+
+/**
+ * Apply the agent's output and attach the run's telemetry. When `applyOutput`
+ * throws — the analyzer's `needs-input` does, after a complete and paid-for run —
+ * the telemetry rides on the error as `partialState`, which the orchestrator
+ * restores before saving. Without this a run that stops to ask questions left no
+ * stage entry and $0 behind.
+ */
+export function applyOutputKeepingTelemetry<O>(
+  applyOutput: (state: PipelineState, output: O) => PipelineState,
+  state: PipelineState,
+  output: O,
+  telemetry: PipelineState['telemetry'],
+): PipelineState {
+  try {
+    return { ...applyOutput(state, output), telemetry };
+  } catch (err) {
+    if (err instanceof PipelineError && !err.partialState) err.partialState = { ...state, telemetry };
+    throw err;
+  }
 }
